@@ -7,7 +7,6 @@ require (
 	github.com/fsnotify/fsnotify v1.4.9
 	github.com/go-logr/logr v0.3.0
 	github.com/go-logr/zapr v0.2.0
-	github.com/google/go-cmp v0.5.2 // indirect
 	github.com/googleapis/gnostic v0.5.1 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/imdario/mergo v0.3.10 // indirect
@@ -15,6 +14,7 @@ require (
 	github.com/onsi/gomega v1.10.2
 	github.com/prometheus/client_golang v1.7.1
 	github.com/prometheus/client_model v0.2.0
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.20.0
 	go.uber.org/goleak v1.1.10
 	go.uber.org/zap v1.15.0
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e

@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/internal/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/internal/metrics"
@@ -161,13 +162,14 @@ func instrumentedHook(path string, hookRaw http.Handler) http.Handler {
 	cnt.WithLabelValues("200")
 	cnt.WithLabelValues("500")
 
-	return promhttp.InstrumentHandlerDuration(
-		lat,
-		promhttp.InstrumentHandlerCounter(
-			cnt,
-			promhttp.InstrumentHandlerInFlight(gge, hookRaw),
-		),
-	)
+	return otelhttp.NewHandler(
+		promhttp.InstrumentHandlerDuration(
+			lat,
+			promhttp.InstrumentHandlerCounter(
+				cnt,
+				promhttp.InstrumentHandlerInFlight(gge, hookRaw),
+			),
+		), "AdmissionWebhook")
 }
 
 // Start runs the server.
