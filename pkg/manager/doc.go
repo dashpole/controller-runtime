@@ -17,5 +17,8 @@ limitations under the License.
 /*
 Package manager is required to create Controllers and provides shared dependencies such as clients, caches, schemes,
 etc.  Controllers must be started by calling Manager.Start.
+
+To enable OpenTelemetry distributed tracing across all controllers and outgoing client requests managed by a
+Manager, set Options.TracerProvider (or Options.Controller.TracerProvider).
 */
 package manager

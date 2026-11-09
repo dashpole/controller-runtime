@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -133,6 +135,23 @@ type TypedOptions[request comparable] struct {
 	// ReconciliationTimeout is used as the timeout passed to the context of each Reconcile call.
 	// By default, there is no timeout.
 	ReconciliationTimeout time.Duration
+
+	// TracerProvider is the OpenTelemetry TracerProvider used to trace reconciliations
+	// for this controller.
+	// Defaults to the Controller.TracerProvider setting from the Manager if unset.
+	// If nil, distributed tracing is disabled for this controller and incurs zero overhead.
+	TracerProvider trace.TracerProvider
+
+	// Propagators is the OpenTelemetry TextMapPropagator used to extract trace context
+	// for this controller.
+	// Defaults to the Controller.Propagators setting from the Manager if unset,
+	// or propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	// when TracerProvider is non-nil.
+	Propagators propagation.TextMapPropagator
+
+	// TraceMetadataExtractor extracts trace context and object metadata for a queued request.
+	// When using builder.ControllerManagedBy(mgr).For(...), this is wired automatically.
+	TraceMetadataExtractor TraceMetadataExtractor[request]
 }
 
 // DefaultFromConfig defaults the config from a config.Controller
@@ -171,6 +190,14 @@ func (options *TypedOptions[request]) DefaultFromConfig(config config.Controller
 
 	if options.ReconciliationTimeout == 0 {
 		options.ReconciliationTimeout = config.ReconciliationTimeout
+	}
+
+	if options.TracerProvider == nil {
+		options.TracerProvider = config.TracerProvider
+	}
+
+	if options.Propagators == nil {
+		options.Propagators = config.Propagators
 	}
 }
 
@@ -303,6 +330,9 @@ func NewTypedUnmanaged[request comparable](name string, options TypedOptions[req
 		LeaderElected:           options.NeedLeaderElection,
 		EnableWarmup:            options.EnableWarmup,
 		ReconciliationTimeout:   options.ReconciliationTimeout,
+		TracerProvider:          options.TracerProvider,
+		Propagators:             options.Propagators,
+		TraceMetadataExtractor:  options.TraceMetadataExtractor,
 	}), nil
 }
 

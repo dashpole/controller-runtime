@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/trace"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -251,6 +252,13 @@ type Options struct {
 	// +optional
 	Controller config.Controller
 
+	// TracerProvider is the OpenTelemetry TracerProvider used to trace controller
+	// reconciliations and outgoing client requests managed by this Manager.
+	// If set, it defaults Controller.TracerProvider when Controller.TracerProvider is nil.
+	// If nil, distributed tracing is disabled and incurs zero overhead.
+	// +optional
+	TracerProvider trace.TracerProvider
+
 	// makeBroadcaster allows deferring the creation of the broadcaster to
 	// avoid leaking goroutines if we never call Start on this manager.  It also
 	// returns whether or not this is a "owned" broadcaster, and as such should be
@@ -328,6 +336,8 @@ func New(config *rest.Config, options Options) (Manager, error) {
 		clusterOptions.Cache = options.Cache
 		clusterOptions.Client = options.Client
 		clusterOptions.EventBroadcaster = options.EventBroadcaster //nolint:staticcheck
+		clusterOptions.TracerProvider = options.Controller.TracerProvider
+		clusterOptions.Propagators = options.Controller.Propagators
 	})
 	if err != nil {
 		return nil, err
@@ -553,6 +563,13 @@ func setOptionsDefaults(config *rest.Config, options Options) (Options, error) {
 
 	if options.Controller.Logger.GetSink() == nil {
 		options.Controller.Logger = options.Logger
+	}
+
+	if options.Controller.TracerProvider == nil {
+		options.Controller.TracerProvider = options.TracerProvider
+	}
+	if options.TracerProvider == nil {
+		options.TracerProvider = options.Controller.TracerProvider
 	}
 
 	if options.BaseContext == nil {

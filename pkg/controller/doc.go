@@ -21,5 +21,14 @@ Package controller provides types and functions for building Controllers.  Contr
 
 To create a new Controller, first create a manager.Manager and pass it to the controller.New function.
 The Controller MUST be started by calling Manager.Start.
+
+# Distributed Tracing
+
+When an OpenTelemetry TracerProvider is configured on the Manager (via manager.Options.TracerProvider
+or config.Controller.TracerProvider) or on an individual controller (via TypedOptions.TracerProvider),
+each reconciliation starts an independent root span linked via OpenTelemetry Span Links to any W3C
+trace context stored on the target object's "tracing.k8s.io/traceparent" annotation, and enriches the
+context-scoped logr/klog logger with "trace_id" and "span_id". When TracerProvider is nil (the default),
+tracing is disabled with zero allocations and zero runtime overhead.
 */
 package controller

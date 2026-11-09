@@ -23,8 +23,12 @@ import (
 	"net/http"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/kubernetes/scheme"
 	eventsv1client "k8s.io/client-go/kubernetes/typed/events/v1"
 	"k8s.io/client-go/rest"
@@ -130,6 +134,15 @@ type Options struct {
 	// Deprecated: using this may cause goroutine leaks if the lifetime of your manager or controllers
 	// is shorter than the lifetime of your process.
 	EventBroadcaster record.EventBroadcaster
+
+	// TracerProvider is the OpenTelemetry TracerProvider used to instrument
+	// outgoing client HTTP requests when an active span is present in the request context.
+	TracerProvider trace.TracerProvider
+
+	// Propagators is the OpenTelemetry TextMapPropagator used to inject trace
+	// context headers on outgoing client HTTP requests.
+	// Defaults to propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}).
+	Propagators propagation.TextMapPropagator
 
 	// makeBroadcaster allows deferring the creation of the broadcaster to
 	// avoid leaking goroutines if we never call Start on this manager.  It also
@@ -252,6 +265,30 @@ func New(config *rest.Config, opts ...Option) (Cluster, error) {
 // setOptionsDefaults set default values for Options fields.
 func setOptionsDefaults(options Options, config *rest.Config) (Options, error) {
 	if options.HTTPClient == nil {
+		propagators := options.Propagators
+		if propagators == nil {
+			propagators = propagation.NewCompositeTextMapPropagator(
+				propagation.TraceContext{},
+				propagation.Baggage{},
+			)
+		}
+		otelOpts := []otelhttp.Option{
+			otelhttp.WithPropagators(propagators),
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return trace.SpanContextFromContext(r.Context()).IsValid() &&
+					(r.URL == nil || r.URL.Query().Get("watch") != "true")
+			}),
+		}
+		if options.TracerProvider != nil {
+			otelOpts = append(otelOpts, otelhttp.WithTracerProvider(options.TracerProvider))
+		}
+		config.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+			return &tracingRoundTripper{
+				base: rt,
+				otel: otelhttp.NewTransport(rt, otelOpts...),
+			}
+		})
+
 		var err error
 		options.HTTPClient, err = rest.HTTPClientFor(config)
 		if err != nil {
@@ -309,4 +346,23 @@ func setOptionsDefaults(options Options, config *rest.Config) (Options, error) {
 	}
 
 	return options, nil
+}
+
+var _ utilnet.RoundTripperWrapper = (*tracingRoundTripper)(nil)
+
+type tracingRoundTripper struct {
+	base http.RoundTripper
+	otel http.RoundTripper
+}
+
+func (t *tracingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.otel.RoundTrip(req)
+}
+
+func (t *tracingRoundTripper) WrappedRoundTripper() http.RoundTripper {
+	return t.base
+}
+
+func (t *tracingRoundTripper) CloseIdleConnections() {
+	utilnet.CloseIdleConnectionsFor(t.base)
 }

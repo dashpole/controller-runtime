@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Controller contains configuration options for controllers. It only includes options
@@ -96,4 +98,17 @@ type Controller struct {
 	// ReconciliationTimeout is used as the timeout passed to the context of each Reconcile call.
 	// By default, there is no timeout.
 	ReconciliationTimeout time.Duration
+
+	// TracerProvider is the OpenTelemetry TracerProvider used to create spans
+	// for controller reconciliations and outgoing client requests.
+	// If nil, distributed tracing is disabled and incurs zero overhead.
+	TracerProvider trace.TracerProvider
+
+	// Propagators is the OpenTelemetry TextMapPropagator used to extract
+	// trace context from object annotations and inject context into outgoing
+	// client requests.
+	// If nil when TracerProvider is non-nil, defaults to
+	// propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}),
+	// matching k8s.io/component-base/tracing.Propagators().
+	Propagators propagation.TextMapPropagator
 }

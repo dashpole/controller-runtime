@@ -25,6 +25,9 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/goleak"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -176,5 +179,53 @@ var _ = Describe("cluster.Cluster", func() {
 		c, err := New(cfg)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.GetAPIReader()).NotTo(BeNil())
+	})
+
+	It("should wrap the HTTPClient transport with otelhttp and trace only non-watch requests carrying an active span in context", func(specCtx SpecContext) {
+		recorder := tracetest.NewSpanRecorder()
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+		defer func() { _ = tp.Shutdown(specCtx) }()
+
+		c, err := New(cfg, func(o *Options) {
+			o.TracerProvider = tp
+			o.Propagators = propagation.TraceContext{}
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.GetHTTPClient()).NotTo(BeNil())
+
+		// Verify the wrapped transport implements utilnet.RoundTripperWrapper so client-go helpers can unwrap it.
+		tlsCfg, err := utilnet.TLSClientConfig(c.GetHTTPClient().Transport)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tlsCfg).NotTo(BeNil())
+		utilnet.CloseIdleConnectionsFor(c.GetHTTPClient().Transport)
+
+		// 1. Background discovery during New() and un-spanned requests must NOT emit orphan root spans.
+		Expect(recorder.Ended()).To(BeEmpty())
+		unspannedReq, err := http.NewRequestWithContext(specCtx, http.MethodGet, cfg.Host+"/api/v1/namespaces", nil)
+		Expect(err).NotTo(HaveOccurred())
+		unspannedResp, err := c.GetHTTPClient().Do(unspannedReq)
+		Expect(err).NotTo(HaveOccurred())
+		_ = unspannedResp.Body.Close()
+		Expect(recorder.Ended()).To(BeEmpty())
+
+		// 2. Non-watch request carrying an active span in ctx should record a child HTTP client span.
+		spannedCtx, parentSpan := tp.Tracer("test").Start(specCtx, "ReconcileTest")
+		defer parentSpan.End()
+
+		req, err := http.NewRequestWithContext(spannedCtx, http.MethodGet, cfg.Host+"/api/v1/namespaces", nil)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := c.GetHTTPClient().Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		_ = resp.Body.Close()
+		Expect(recorder.Ended()).To(HaveLen(1))
+		Expect(recorder.Ended()[0].Parent().SpanID()).To(Equal(parentSpan.SpanContext().SpanID()))
+
+		// 3. Watch request (?watch=true) even with an active span in ctx should be filtered out.
+		watchCtx, cancel := context.WithCancel(spannedCtx)
+		cancel()
+		watchReq, err := http.NewRequestWithContext(watchCtx, http.MethodGet, cfg.Host+"/api/v1/namespaces?watch=true", nil)
+		Expect(err).NotTo(HaveOccurred())
+		_, _ = c.GetHTTPClient().Do(watchReq)
+		Expect(recorder.Ended()).To(HaveLen(1))
 	})
 })

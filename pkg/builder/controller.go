@@ -424,6 +424,28 @@ func (blder *TypedBuilder[request]) doController(r reconcile.TypedReconciler[req
 		ctrlOptions.CacheSyncTimeout = globalOpts.CacheSyncTimeout
 	}
 
+	if hasGVK &&
+		ctrlOptions.TraceMetadataExtractor == nil &&
+		reflect.TypeFor[request]() == reflect.TypeFor[reconcile.Request]() &&
+		(!controller.IsNoopTracerProvider(ctrlOptions.TracerProvider) || !controller.IsNoopTracerProvider(globalOpts.TracerProvider)) {
+		projectedObj, err := blder.project(blder.forInput.object, blder.forInput.objectProjection)
+		if err != nil {
+			return err
+		}
+		propagators := ctrlOptions.Propagators
+		if propagators == nil {
+			propagators = globalOpts.Propagators
+		}
+		var reader client.Reader
+		if c := blder.mgr.GetCache(); c != nil {
+			reader = c
+		} else {
+			reader = blder.mgr.GetClient()
+		}
+		extractor := controller.NewCacheTraceMetadataExtractor(reader, projectedObj, gvk, propagators)
+		reflect.ValueOf(&ctrlOptions.TraceMetadataExtractor).Elem().Set(reflect.ValueOf(extractor))
+	}
+
 	controllerName, err := blder.getControllerName(gvk, hasGVK)
 	if err != nil {
 		return err

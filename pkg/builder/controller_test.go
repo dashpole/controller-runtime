@@ -25,6 +25,9 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,6 +94,77 @@ var _ = Describe("application", func() {
 				Build(noop)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(instance).NotTo(BeNil())
+		})
+
+		It("should emit reconciliation spans with Span Links when TracerProvider is configured on the Manager", func(specCtx SpecContext) {
+			exporter := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+			defer func() { _ = tp.Shutdown(context.Background()) }()
+
+			m, err := manager.New(cfg, manager.Options{
+				TracerProvider: tp,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciledCh := make(chan trace.SpanContext, 1)
+			Expect(ControllerManagedBy(m).
+				Named("traced_deployment_controller").
+				For(&appsv1.Deployment{}).
+				Complete(reconcile.Func(func(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+					sc := trace.SpanFromContext(ctx).SpanContext()
+					select {
+					case reconciledCh <- sc:
+					default:
+					}
+					return reconcile.Result{}, nil
+				}))).To(Succeed())
+
+			ctx, cancel := context.WithCancel(specCtx)
+			defer cancel()
+			mgrDone := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(mgrDone)
+				_ = m.Start(ctx)
+			}()
+
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "traced-deploy",
+					Annotations: map[string]string{
+						controller.TraceparentAnnotationKey: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+					},
+				},
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "traced"},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "traced"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}},
+						},
+					},
+				},
+			}
+			Expect(m.GetClient().Create(ctx, dep)).To(Succeed())
+
+			var observedSC trace.SpanContext
+			Eventually(reconciledCh).Should(Receive(&observedSC))
+			Expect(observedSC.IsValid()).To(BeTrue())
+
+			Eventually(func() bool {
+				for _, s := range exporter.GetSpans() {
+					if s.Name == "ReconcileDeployment" && len(s.Links) == 1 {
+						return s.Links[0].SpanContext.TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736"
+					}
+				}
+				return false
+			}).Should(BeTrue())
+
+			cancel()
+			<-mgrDone
 		})
 
 		It("should return error if given two apiType objects in For function", func() {
@@ -530,6 +604,76 @@ var _ = Describe("application", func() {
 			bldr2 := ControllerManagedBy(mgr).For(&appsv1.Deployment{}, OnlyMetadata).Named("deployment-5")
 
 			doReconcileTest(ctx, "6", mgr, true, bldr1, bldr2)
+		})
+
+		It("should extract trace metadata from PartialObjectMetadata cache when For uses OnlyMetadata", func(specCtx SpecContext) {
+			exporter := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+			defer func() { _ = tp.Shutdown(context.Background()) }()
+
+			tracedMgr, err := manager.New(cfg, manager.Options{
+				NewCache:       newNonTypedOnlyCache,
+				TracerProvider: tp,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciledCh := make(chan struct{}, 1)
+			Expect(ControllerManagedBy(tracedMgr).
+				Named("metadata_traced_deployment").
+				For(&appsv1.Deployment{}, OnlyMetadata).
+				Complete(reconcile.Func(func(_ context.Context, req reconcile.Request) (reconcile.Result, error) {
+					if req.Name == "traced-meta-deploy" {
+						select {
+						case reconciledCh <- struct{}{}:
+						default:
+						}
+					}
+					return reconcile.Result{}, nil
+				}))).To(Succeed())
+
+			ctx, cancel := context.WithCancel(specCtx)
+			defer cancel()
+			mgrDone := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(mgrDone)
+				_ = tracedMgr.Start(ctx)
+			}()
+
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "traced-meta-deploy",
+					Annotations: map[string]string{
+						controller.TraceparentAnnotationKey: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+					},
+				},
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "traced-meta"},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "traced-meta"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}},
+						},
+					},
+				},
+			}
+			Expect(tracedMgr.GetClient().Create(ctx, dep)).To(Succeed())
+			Eventually(reconciledCh).Should(Receive())
+
+			Eventually(func() bool {
+				for _, s := range exporter.GetSpans() {
+					if s.Name == "ReconcileDeployment" && len(s.Links) == 1 {
+						return s.Links[0].SpanContext.TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736"
+					}
+				}
+				return false
+			}).Should(BeTrue())
+
+			cancel()
+			<-mgrDone
 		})
 
 		It("should support watching For, Owns, and Watch as metadata", func(ctx SpecContext) {

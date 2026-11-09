@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -90,6 +92,17 @@ type Options[request comparable] struct {
 	// ReconciliationTimeout is used as the timeout passed to the context of each Reconcile call.
 	// By default, there is no timeout.
 	ReconciliationTimeout time.Duration
+
+	// TracerProvider is the OpenTelemetry TracerProvider used to trace reconciliations.
+	// If nil, distributed tracing is disabled and incurs zero overhead.
+	TracerProvider trace.TracerProvider
+
+	// Propagators is the OpenTelemetry TextMapPropagator used to extract trace context
+	// from object annotations.
+	Propagators propagation.TextMapPropagator
+
+	// TraceMetadataExtractor extracts trace context and object metadata for a queued request.
+	TraceMetadataExtractor TraceMetadataExtractor[request]
 }
 
 // Controller implements controller.Controller.
@@ -173,10 +186,28 @@ type Controller[request comparable] struct {
 	EnableWarmup *bool
 
 	ReconciliationTimeout time.Duration
+
+	// TracerProvider is the OpenTelemetry TracerProvider used to trace reconciliations.
+	// If nil, distributed tracing is disabled and incurs zero overhead.
+	TracerProvider trace.TracerProvider
+
+	// Propagators is the OpenTelemetry TextMapPropagator used to extract trace context
+	// from object annotations.
+	Propagators propagation.TextMapPropagator
+
+	// TraceMetadataExtractor extracts trace context and object metadata for a queued request.
+	TraceMetadataExtractor TraceMetadataExtractor[request]
+
+	tracer       trace.Tracer
+	requeuedKeys sync.Map
 }
 
 // New returns a new Controller configured with the given options.
 func New[request comparable](options Options[request]) *Controller[request] {
+	var tracer trace.Tracer
+	if !IsNoopTracerProvider(options.TracerProvider) {
+		tracer = options.TracerProvider.Tracer(InstrumentationName)
+	}
 	return &Controller[request]{
 		Do:                      options.Do,
 		RateLimiter:             options.RateLimiter,
@@ -189,6 +220,10 @@ func New[request comparable](options Options[request]) *Controller[request] {
 		LeaderElected:           options.LeaderElected,
 		EnableWarmup:            options.EnableWarmup,
 		ReconciliationTimeout:   options.ReconciliationTimeout,
+		TracerProvider:          options.TracerProvider,
+		Propagators:             options.Propagators,
+		TraceMetadataExtractor:  options.TraceMetadataExtractor,
+		tracer:                  tracer,
 	}
 }
 
@@ -472,6 +507,19 @@ func (c *Controller[request]) reconcileHandler(ctx context.Context, req request,
 	reconcileID := uuid.NewUUID()
 
 	log = log.WithValues("reconcileID", reconcileID)
+	var span trace.Span
+	var rqState requeueState
+	if c.tracer != nil {
+		ctx, log, span, rqState = c.startReconcileSpan(ctx, req, priority, log)
+		defer func() {
+			if span != nil {
+				if r := recover(); r != nil {
+					c.endReconcileSpan(span, req, reconcile.Result{}, fmt.Errorf("panic: %v", r), false, rqState)
+					panic(r)
+				}
+			}
+		}()
+	}
 	ctx = logf.IntoContext(ctx, log)
 	ctx = addReconcileID(ctx, reconcileID)
 
@@ -514,6 +562,10 @@ func (c *Controller[request]) reconcileHandler(ctx context.Context, req request,
 		// get queued again until another change happens.
 		c.Queue.Forget(req)
 		ctrlmetrics.ReconcileTotal.WithLabelValues(c.Name, labelSuccess).Inc()
+	}
+	if span != nil {
+		c.endReconcileSpan(span, req, result, err, true, rqState)
+		span = nil
 	}
 }
 

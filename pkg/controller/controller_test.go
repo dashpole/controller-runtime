@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/goleak"
 	corev1 "k8s.io/api/core/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -575,6 +576,61 @@ var _ = Describe("controller.Controller", func() {
 			Expect(ok).To(BeTrue())
 
 			Expect(ctrl.ReconciliationTimeout).To(Equal(time.Minute))
+		})
+
+		It("should default TracerProvider from manager.Options.TracerProvider or config.Controller.TracerProvider", func() {
+			tp := sdktrace.NewTracerProvider()
+			defer func() { _ = tp.Shutdown(context.Background()) }()
+
+			m1, err := manager.New(cfg, manager.Options{
+				TracerProvider: tp,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			c1, err := controller.New("mgr-top-level-tracer-provider", m1, controller.Options{
+				Reconciler: rec,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ctrl1, ok := c1.(*internalcontroller.Controller[reconcile.Request])
+			Expect(ok).To(BeTrue())
+			Expect(ctrl1.TracerProvider).To(BeIdenticalTo(tp))
+
+			m2, err := manager.New(cfg, manager.Options{
+				Controller: config.Controller{TracerProvider: tp},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			c2, err := controller.New("mgr-controller-config-tracer-provider", m2, controller.Options{
+				Reconciler: rec,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ctrl2, ok := c2.(*internalcontroller.Controller[reconcile.Request])
+			Expect(ok).To(BeTrue())
+			Expect(ctrl2.TracerProvider).To(BeIdenticalTo(tp))
+		})
+
+		It("should allow overriding TracerProvider per controller", func() {
+			mgrTP := sdktrace.NewTracerProvider()
+			defer func() { _ = mgrTP.Shutdown(context.Background()) }()
+			ctrlTP := sdktrace.NewTracerProvider()
+			defer func() { _ = ctrlTP.Shutdown(context.Background()) }()
+
+			m, err := manager.New(cfg, manager.Options{
+				TracerProvider: mgrTP,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			c, err := controller.New("ctrl-override-tracer-provider", m, controller.Options{
+				Reconciler:     rec,
+				TracerProvider: ctrlTP,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ctrl, ok := c.(*internalcontroller.Controller[reconcile.Request])
+			Expect(ok).To(BeTrue())
+			Expect(ctrl.TracerProvider).To(BeIdenticalTo(ctrlTP))
 		})
 	})
 })

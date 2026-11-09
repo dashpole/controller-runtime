@@ -33,6 +33,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/goleak"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -2027,6 +2028,18 @@ var _ = Describe("manger.Manager", func() {
 		m, err := New(cfg, Options{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(m.GetAPIReader()).NotTo(BeNil())
+	})
+
+	It("should default Controller.TracerProvider from Options.TracerProvider", func(specCtx SpecContext) {
+		tp := sdktrace.NewTracerProvider()
+		defer func() { _ = tp.Shutdown(specCtx) }()
+
+		m, err := New(cfg, Options{
+			TracerProvider: tp,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(m.GetControllerOptions().TracerProvider).To(Equal(tp))
+		Expect(m.GetHTTPClient()).NotTo(BeNil())
 	})
 
 	It("should run warmup runnables before leader election is won", func(ctx SpecContext) {
